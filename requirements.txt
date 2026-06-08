@@ -1,7 +1,1 @@
-__pycache__/
-*.pyc
-.env
-.pytest_cache/
-logs/*.jsonl
-data/paper_state.json
 
