@@ -3,6 +3,9 @@ import os
 import time
 from datetime import datetime, timezone
 
+from main import AccountState, OrderRequest, OrderSide, Position
+from risk import evaluate_order_risk
+
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
@@ -19,8 +22,65 @@ ALLOW_MARGIN = os.getenv("ALLOW_MARGIN", "false").lower() == "true"
 ALLOW_SHORTS = os.getenv("ALLOW_SHORTS", "false").lower() == "true"
 
 
+def build_paper_account():
+    return AccountState(
+        portfolio_value=10000,
+        cash=2000,
+        daily_pnl=0,
+        daily_pnl_pct=0,
+        buying_power=2000,
+    )
+
+
+def build_paper_positions():
+    return [
+        Position(
+            symbol="NVDA",
+            quantity=10,
+            market_value=2000,
+            average_cost=150,
+            current_price=200,
+        )
+    ]
+
+
+def build_paper_order():
+    return OrderRequest(
+        symbol="MSFT",
+        side=OrderSide.BUY,
+        quantity=1,
+        limit_price=100,
+        reason="Paper-mode worker risk integration test.",
+    )
+
+
+def risk_decision_to_dict(decision):
+    return {
+        "approved": decision.approved,
+        "rejection_reason": decision.rejection_reason,
+        "max_order_value": decision.max_order_value,
+        "projected_position_weight_pct": decision.projected_position_weight_pct,
+        "projected_daily_drawdown_pct": decision.projected_daily_drawdown_pct,
+        "exceptional_conviction_required": decision.exceptional_conviction_required,
+        "exceptional_conviction_passed": decision.exceptional_conviction_passed,
+    }
+
+
 def run_agent_cycle():
     now = datetime.now(timezone.utc).isoformat()
+
+    account = build_paper_account()
+    positions = build_paper_positions()
+    proposed_order = build_paper_order()
+
+    risk_decision = evaluate_order_risk(
+        account,
+        positions,
+        proposed_order,
+        max_daily_loss_pct=MAX_DAILY_PORTFOLIO_LOSS_PCT,
+        max_position_weight_pct=MAX_POSITION_WEIGHT_PCT,
+        max_new_position_weight_pct=MAX_NEW_POSITION_WEIGHT_PCT,
+    )
 
     audit_event = {
         "timestamp": now,
@@ -40,13 +100,27 @@ def run_agent_cycle():
             "allow_margin": ALLOW_MARGIN,
             "allow_shorts": ALLOW_SHORTS,
         },
+        "paper_account": {
+            "portfolio_value": account.portfolio_value,
+            "daily_pnl_pct": account.daily_pnl_pct,
+            "buying_power": account.buying_power,
+        },
+        "paper_order_proposed": {
+            "symbol": proposed_order.symbol,
+            "side": proposed_order.side.value,
+            "quantity": proposed_order.quantity,
+            "limit_price": proposed_order.limit_price,
+            "reason": proposed_order.reason,
+        },
+        "risk_decision": risk_decision_to_dict(risk_decision),
         "orders_submitted": 0,
         "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Worker is alive. Real portfolio, market data, strategy, and risk checks are not wired in yet.",
+        "message": "Worker is alive and risk.py is wired into the paper cycle. No live orders are submitted.",
     }
 
     if TRADING_MODE == "live":
         audit_event["status"] = "live_blocked"
+        audit_event["orders_submitted"] = 0
         audit_event["message"] = (
             "Live mode is blocked until an approved Robinhood stock execution connector, "
             "fresh account data, fresh market data, and deterministic risk gates are implemented."
@@ -73,5 +147,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
     main()
