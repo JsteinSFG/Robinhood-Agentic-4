@@ -1,0 +1,5 @@
+from rh_agent.web import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
