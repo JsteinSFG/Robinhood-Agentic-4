@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from main import AccountState, OrderRequest, OrderSide, Position
 from risk import evaluate_order_risk
 
+WORKER_VERSION = "risk-wired-2026-06-08"
+
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
@@ -84,6 +86,7 @@ def run_agent_cycle():
 
     audit_event = {
         "timestamp": now,
+        "worker_version": WORKER_VERSION,
         "service": "Robinhood autonomous stock agent",
         "mode": TRADING_MODE,
         "broker": BROKER,
@@ -126,11 +129,20 @@ def run_agent_cycle():
             "fresh account data, fresh market data, and deterministic risk gates are implemented."
         )
 
+    print(
+        f"RISK CHECK | worker_version={WORKER_VERSION} | "
+        f"approved={risk_decision.approved} | "
+        f"orders_submitted=0 | "
+        f"projected_drawdown={risk_decision.projected_daily_drawdown_pct:.2f}% | "
+        f"projected_weight={risk_decision.projected_position_weight_pct:.2f}%",
+        flush=True,
+    )
+
     print(json.dumps(audit_event), flush=True)
 
 
 def main():
-    print("Starting Robinhood 24/7 worker...", flush=True)
+    print(f"Starting Robinhood 24/7 worker | version={WORKER_VERSION}", flush=True)
 
     while True:
         try:
@@ -138,6 +150,7 @@ def main():
         except Exception as exc:
             error_event = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "worker_version": WORKER_VERSION,
                 "status": "cycle_error",
                 "error": str(exc),
             }
