@@ -3,12 +3,13 @@ import os
 import time
 from datetime import datetime, timezone
 
-from main import AccountState, Position
+from broker import build_broker
+from config import Settings
 from market_data import build_market_data_provider
 from risk import evaluate_order_risk
 from strategy import candidate_to_dict, candidate_to_order, propose_paper_candidate
 
-WORKER_VERSION = "strategy-risk-wired-2026-06-09"
+WORKER_VERSION = "broker-read-risk-strategy-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
@@ -18,36 +19,6 @@ BROKER = os.getenv("BROKER", "paper")
 MAX_DAILY_PORTFOLIO_LOSS_PCT = float(os.getenv("MAX_DAILY_PORTFOLIO_LOSS_PCT", "5"))
 MAX_POSITION_WEIGHT_PCT = float(os.getenv("MAX_POSITION_WEIGHT_PCT", "20"))
 MAX_NEW_POSITION_WEIGHT_PCT = float(os.getenv("MAX_NEW_POSITION_WEIGHT_PCT", "5"))
-
-STOCKS_ONLY = os.getenv("STOCKS_ONLY", "true").lower() == "true"
-ALLOW_OPTIONS = os.getenv("ALLOW_OPTIONS", "false").lower() == "true"
-ALLOW_CRYPTO = os.getenv("ALLOW_CRYPTO", "false").lower() == "true"
-ALLOW_MARGIN = os.getenv("ALLOW_MARGIN", "false").lower() == "true"
-ALLOW_SHORTS = os.getenv("ALLOW_SHORTS", "false").lower() == "true"
-
-
-def build_paper_account():
-    return AccountState(
-        portfolio_value=10000,
-        cash=2000,
-        daily_pnl=0,
-        daily_pnl_pct=0,
-        buying_power=2000,
-    )
-
-
-def build_paper_positions(market_data):
-    nvda_quote = market_data.get_quote("NVDA")
-
-    return [
-        Position(
-            symbol="NVDA",
-            quantity=10,
-            market_value=round(10 * nvda_quote.price, 2),
-            average_cost=150,
-            current_price=nvda_quote.price,
-        )
-    ]
 
 
 def risk_decision_to_dict(decision):
@@ -65,15 +36,28 @@ def risk_decision_to_dict(decision):
     }
 
 
-def quote_to_dict(quote):
+def account_to_dict(account):
     return {
-        "symbol": quote.symbol,
-        "price": quote.price,
-        "bid": quote.bid,
-        "ask": quote.ask,
-        "as_of": quote.as_of,
-        "source": quote.source,
+        "portfolio_value": account.portfolio_value,
+        "cash": account.cash,
+        "daily_pnl": account.daily_pnl,
+        "daily_pnl_pct": account.daily_pnl_pct,
+        "buying_power": account.buying_power,
+        "as_of": account.as_of,
     }
+
+
+def positions_to_dict(positions):
+    return [
+        {
+            "symbol": position.symbol,
+            "quantity": position.quantity,
+            "market_value": position.market_value,
+            "average_cost": position.average_cost,
+            "current_price": position.current_price,
+        }
+        for position in positions
+    ]
 
 
 def order_to_dict(order):
@@ -89,12 +73,26 @@ def order_to_dict(order):
     }
 
 
+def quote_to_dict(quote):
+    return {
+        "symbol": quote.symbol,
+        "price": quote.price,
+        "bid": quote.bid,
+        "ask": quote.ask,
+        "as_of": quote.as_of,
+        "source": quote.source,
+    }
+
+
 def run_agent_cycle():
     now = datetime.now(timezone.utc).isoformat()
 
+    settings = Settings()
+    broker = build_broker(settings)
     market_data = build_market_data_provider()
-    account = build_paper_account()
-    positions = build_paper_positions(market_data)
+
+    account = broker.get_account()
+    positions = broker.get_positions()
 
     candidate = propose_paper_candidate(account, positions, market_data)
     proposed_order = candidate_to_order(candidate)
@@ -118,26 +116,23 @@ def run_agent_cycle():
         "service": "Robinhood autonomous stock agent",
         "mode": TRADING_MODE,
         "broker": BROKER,
-        "status": "paper_cycle_ok",
+        "status": "paper_broker_read_ok",
+        "account": account_to_dict(account),
+        "positions": positions_to_dict(positions),
         "market_quote": quote_to_dict(quote),
         "strategy_candidate": candidate_to_dict(candidate),
+        "paper_order_proposed": order_to_dict(proposed_order),
         "risk_decision": risk_decision_to_dict(risk_decision),
         "orders_submitted": 0,
-        "live_execution_enabled": TRADING_MODE == "live",
-        "asset_class_rules": {
-            "stocks_only": STOCKS_ONLY,
-            "allow_options": ALLOW_OPTIONS,
-            "allow_crypto": ALLOW_CRYPTO,
-            "allow_margin": ALLOW_MARGIN,
-            "allow_shorts": ALLOW_SHORTS,
-        },
-        "risk_limits": {
-            "max_daily_portfolio_loss_pct": MAX_DAILY_PORTFOLIO_LOSS_PCT,
-            "max_position_weight_pct": MAX_POSITION_WEIGHT_PCT,
-            "max_new_position_weight_pct": MAX_NEW_POSITION_WEIGHT_PCT,
-        },
-        "message": "Worker is alive. market_data.py, strategy.py, and risk.py are wired together. No live orders are submitted.",
+        "message": "Worker is reading the paper broker, running strategy, and checking risk. No orders are submitted.",
     }
+
+    print(
+        f"BROKER READ | cash={account.cash:.2f} | "
+        f"portfolio_value={account.portfolio_value:.2f} | "
+        f"positions={len(positions)}",
+        flush=True,
+    )
 
     print(
         f"STRATEGY | candidate={candidate.symbol if candidate else 'none'} | "
