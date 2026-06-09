@@ -32,46 +32,50 @@ def propose_paper_candidate(
     if account.buying_power <= 0:
         return None
 
-    if "MSFT" not in symbols:
+    if "MSFT" in symbols:
         quote = market_data.get_quote("MSFT")
         return StrategyCandidate(
             symbol="MSFT",
             company_name="Microsoft",
-            action="buy",
-            thesis="AI infrastructure exposure through cloud, enterprise software, and data center demand.",
-            confidence="low",
-            quantity=1,
-            limit_price=quote.ask,
-            reason="Paper-mode strategy candidate for market data and risk integration.",
-        )
-
-    if "NVDA" in symbols:
-        quote = market_data.get_quote("NVDA")
-        return StrategyCandidate(
-            symbol="NVDA",
-            company_name="NVIDIA",
             action="hold",
-            thesis="AI infrastructure leader, but existing exposure should be concentration-checked before any add.",
+            thesis="Already held in the paper portfolio. Do not rebuy every worker cycle.",
             confidence="medium",
             quantity=0,
             limit_price=quote.ask,
-            reason="Paper-mode hold candidate. No order proposed.",
+            reason="Duplicate-buy guard active. No order proposed.",
         )
 
-    return None
+    quote = market_data.get_quote("MSFT")
+
+    return StrategyCandidate(
+        symbol="MSFT",
+        company_name="Microsoft",
+        action="buy",
+        thesis="AI infrastructure exposure through cloud, enterprise software, and data center demand.",
+        confidence="low",
+        quantity=1,
+        limit_price=quote.ask,
+        reason="Paper-mode strategy candidate. First buy only; duplicate-buy guard will hold afterward.",
+    )
 
 
-def candidate_to_order(candidate: StrategyCandidate) -> OrderRequest | None:
-    if candidate.action == "buy":
-        return OrderRequest(
-            symbol=candidate.symbol,
-            side=OrderSide.BUY,
-            quantity=candidate.quantity,
-            limit_price=candidate.limit_price,
-            reason=candidate.reason,
-        )
+def candidate_to_order(candidate: StrategyCandidate | None) -> OrderRequest | None:
+    if candidate is None:
+        return None
 
-    return None
+    if candidate.action != "buy":
+        return None
+
+    if candidate.quantity <= 0:
+        return None
+
+    return OrderRequest(
+        symbol=candidate.symbol,
+        side=OrderSide.BUY,
+        quantity=candidate.quantity,
+        limit_price=candidate.limit_price,
+        reason=candidate.reason,
+    )
 
 
 def candidate_to_dict(candidate: StrategyCandidate | None):
