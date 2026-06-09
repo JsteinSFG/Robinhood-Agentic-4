@@ -3,7 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-WORKER_VERSION = "paper-execution-2026-06-09"
+WORKER_VERSION = "daily-trade-limit-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
@@ -13,6 +13,7 @@ BROKER = os.getenv("BROKER", "paper")
 MAX_DAILY_PORTFOLIO_LOSS_PCT = float(os.getenv("MAX_DAILY_PORTFOLIO_LOSS_PCT", "5"))
 MAX_POSITION_WEIGHT_PCT = float(os.getenv("MAX_POSITION_WEIGHT_PCT", "20"))
 MAX_NEW_POSITION_WEIGHT_PCT = float(os.getenv("MAX_NEW_POSITION_WEIGHT_PCT", "5"))
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "2"))
 
 
 def now_iso():
@@ -45,6 +46,7 @@ def run_agent_cycle():
 
     account = broker.get_account()
     positions = broker.get_positions()
+    trades_today = broker.get_trades_today()
 
     candidate = propose_paper_candidate(account, positions, market_data)
     proposed_order = candidate_to_order(candidate)
@@ -53,6 +55,7 @@ def run_agent_cycle():
     risk_decision = None
     order_status = None
     orders_submitted = 0
+    execution_block_reason = None
 
     if proposed_order:
         risk_decision = evaluate_order_risk(
@@ -65,7 +68,13 @@ def run_agent_cycle():
             max_new_position_weight_pct=MAX_NEW_POSITION_WEIGHT_PCT,
         )
 
-        if TRADING_MODE == "paper" and risk_decision.approved:
+        if trades_today >= MAX_TRADES_PER_DAY:
+            execution_block_reason = "Daily trade limit reached."
+
+        elif TRADING_MODE != "paper":
+            execution_block_reason = "Live execution is blocked."
+
+        elif risk_decision.approved:
             order_status = broker.place_order(proposed_order)
             orders_submitted = 1 if order_status.status == "filled" else 0
 
@@ -78,28 +87,24 @@ def run_agent_cycle():
         "status": "paper_execution_cycle_ok",
         "account_before": dict_from_object(account),
         "positions_before": [dict_from_object(position) for position in positions],
+        "trades_today": trades_today,
+        "max_trades_per_day": MAX_TRADES_PER_DAY,
         "market_quote": dict_from_object(quote),
         "strategy_candidate": candidate_to_dict(candidate),
         "paper_order_proposed": dict_from_object(proposed_order),
         "risk_decision": dict_from_object(risk_decision),
+        "execution_block_reason": execution_block_reason,
         "order_status": dict_from_object(order_status),
         "orders_submitted": orders_submitted,
         "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Paper execution is enabled. Live execution remains blocked.",
+        "message": "Paper execution is enabled with a daily trade limit. Live execution remains blocked.",
     }
-
-    if TRADING_MODE == "live":
-        audit_event["status"] = "live_blocked"
-        audit_event["orders_submitted"] = 0
-        audit_event["order_status"] = None
-        audit_event["message"] = (
-            "Live mode is blocked. No live Robinhood connector is approved or configured."
-        )
 
     print(
         f"BROKER READ | cash={account.cash:.2f} | "
         f"portfolio_value={account.portfolio_value:.2f} | "
-        f"positions={len(positions)}",
+        f"positions={len(positions)} | "
+        f"trades_today={trades_today}/{MAX_TRADES_PER_DAY}",
         flush=True,
     )
 
@@ -123,6 +128,9 @@ def run_agent_cycle():
             "no_order_proposed=True",
             flush=True,
         )
+
+    if execution_block_reason:
+        print(f"EXECUTION BLOCKED | reason={execution_block_reason}", flush=True)
 
     if order_status:
         print(
