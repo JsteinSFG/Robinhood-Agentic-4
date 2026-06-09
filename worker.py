@@ -1,14 +1,14 @@
-from strategy import candidate_to_dict, candidate_to_order, propose_paper_candidate
 import json
 import os
 import time
 from datetime import datetime, timezone
 
-from main import AccountState, OrderRequest, OrderSide, Position
+from main import AccountState, Position
 from market_data import build_market_data_provider
 from risk import evaluate_order_risk
+from strategy import candidate_to_dict, candidate_to_order, propose_paper_candidate
 
-WORKER_VERSION = "market-data-risk-wired-2026-06-09"
+WORKER_VERSION = "strategy-risk-wired-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
@@ -36,8 +36,8 @@ def build_paper_account():
     )
 
 
-def build_paper_positions():
-    nvda_quote = build_market_data_provider().get_quote("NVDA")
+def build_paper_positions(market_data):
+    nvda_quote = market_data.get_quote("NVDA")
 
     return [
         Position(
@@ -50,19 +50,10 @@ def build_paper_positions():
     ]
 
 
-def build_paper_order(market_data):
-    quote = market_data.get_quote("MSFT")
-
-    return OrderRequest(
-        symbol="MSFT",
-        side=OrderSide.BUY,
-        quantity=1,
-        limit_price=quote.ask,
-        reason="Paper-mode market data and risk integration test.",
-    ), quote
-
-
 def risk_decision_to_dict(decision):
+    if decision is None:
+        return None
+
     return {
         "approved": decision.approved,
         "rejection_reason": decision.rejection_reason,
@@ -85,22 +76,41 @@ def quote_to_dict(quote):
     }
 
 
+def order_to_dict(order):
+    if order is None:
+        return None
+
+    return {
+        "symbol": order.symbol,
+        "side": order.side.value,
+        "quantity": order.quantity,
+        "limit_price": order.limit_price,
+        "reason": order.reason,
+    }
+
+
 def run_agent_cycle():
     now = datetime.now(timezone.utc).isoformat()
 
     market_data = build_market_data_provider()
     account = build_paper_account()
-    positions = build_paper_positions()
-    proposed_order, quote = build_paper_order(market_data)
+    positions = build_paper_positions(market_data)
 
-    risk_decision = evaluate_order_risk(
-        account,
-        positions,
-        proposed_order,
-        max_daily_loss_pct=MAX_DAILY_PORTFOLIO_LOSS_PCT,
-        max_position_weight_pct=MAX_POSITION_WEIGHT_PCT,
-        max_new_position_weight_pct=MAX_NEW_POSITION_WEIGHT_PCT,
-    )
+    candidate = propose_paper_candidate(account, positions, market_data)
+    proposed_order = candidate_to_order(candidate)
+    quote = market_data.get_quote(candidate.symbol) if candidate else market_data.get_quote("MSFT")
+
+    risk_decision = None
+    if proposed_order:
+        risk_decision = evaluate_order_risk(
+            account,
+            positions,
+            proposed_order,
+            exceptional_conviction=candidate.exceptional_conviction if candidate else False,
+            max_daily_loss_pct=MAX_DAILY_PORTFOLIO_LOSS_PCT,
+            max_position_weight_pct=MAX_POSITION_WEIGHT_PCT,
+            max_new_position_weight_pct=MAX_NEW_POSITION_WEIGHT_PCT,
+        )
 
     audit_event = {
         "timestamp": now,
@@ -110,11 +120,10 @@ def run_agent_cycle():
         "broker": BROKER,
         "status": "paper_cycle_ok",
         "market_quote": quote_to_dict(quote),
-        "risk_limits": {
-            "max_daily_portfolio_loss_pct": MAX_DAILY_PORTFOLIO_LOSS_PCT,
-            "max_position_weight_pct": MAX_POSITION_WEIGHT_PCT,
-            "max_new_position_weight_pct": MAX_NEW_POSITION_WEIGHT_PCT,
-        },
+        "strategy_candidate": candidate_to_dict(candidate),
+        "risk_decision": risk_decision_to_dict(risk_decision),
+        "orders_submitted": 0,
+        "live_execution_enabled": TRADING_MODE == "live",
         "asset_class_rules": {
             "stocks_only": STOCKS_ONLY,
             "allow_options": ALLOW_OPTIONS,
@@ -122,56 +131,36 @@ def run_agent_cycle():
             "allow_margin": ALLOW_MARGIN,
             "allow_shorts": ALLOW_SHORTS,
         },
-        "paper_account": {
-            "portfolio_value": account.portfolio_value,
-            "daily_pnl_pct": account.daily_pnl_pct,
-            "buying_power": account.buying_power,
+        "risk_limits": {
+            "max_daily_portfolio_loss_pct": MAX_DAILY_PORTFOLIO_LOSS_PCT,
+            "max_position_weight_pct": MAX_POSITION_WEIGHT_PCT,
+            "max_new_position_weight_pct": MAX_NEW_POSITION_WEIGHT_PCT,
         },
-        "paper_positions": [
-            {
-                "symbol": position.symbol,
-                "quantity": position.quantity,
-                "market_value": position.market_value,
-                "average_cost": position.average_cost,
-                "current_price": position.current_price,
-            }
-            for position in positions
-        ],
-        "paper_order_proposed": {
-            "symbol": proposed_order.symbol,
-            "side": proposed_order.side.value,
-            "quantity": proposed_order.quantity,
-            "limit_price": proposed_order.limit_price,
-            "reason": proposed_order.reason,
-        },
-        "risk_decision": risk_decision_to_dict(risk_decision),
-        "orders_submitted": 0,
-        "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Worker is alive, market_data.py is wired in, and risk.py is checking the paper order. No live orders are submitted.",
+        "message": "Worker is alive. market_data.py, strategy.py, and risk.py are wired together. No live orders are submitted.",
     }
 
-    if TRADING_MODE == "live":
-        audit_event["status"] = "live_blocked"
-        audit_event["orders_submitted"] = 0
-        audit_event["message"] = (
-            "Live mode is blocked until an approved Robinhood stock execution connector, "
-            "fresh account data, fresh market data, and deterministic risk gates are implemented."
+    print(
+        f"STRATEGY | candidate={candidate.symbol if candidate else 'none'} | "
+        f"action={candidate.action if candidate else 'none'} | "
+        f"orders_submitted=0",
+        flush=True,
+    )
+
+    if risk_decision:
+        print(
+            f"RISK CHECK | worker_version={WORKER_VERSION} | "
+            f"approved={risk_decision.approved} | "
+            f"orders_submitted=0 | "
+            f"projected_drawdown={risk_decision.projected_daily_drawdown_pct:.2f}% | "
+            f"projected_weight={risk_decision.projected_position_weight_pct:.2f}%",
+            flush=True,
         )
-
-    print(
-        f"MARKET DATA | symbol={quote.symbol} | price={quote.price} | "
-        f"bid={quote.bid} | ask={quote.ask} | source={quote.source}",
-        flush=True,
-    )
-
-    print(
-        f"RISK CHECK | worker_version={WORKER_VERSION} | "
-        f"approved={risk_decision.approved} | "
-        f"orders_submitted=0 | "
-        f"projected_drawdown={risk_decision.projected_daily_drawdown_pct:.2f}% | "
-        f"projected_weight={risk_decision.projected_position_weight_pct:.2f}%",
-        flush=True,
-    )
+    else:
+        print(
+            f"RISK CHECK | worker_version={WORKER_VERSION} | "
+            "no_order_proposed=True | orders_submitted=0",
+            flush=True,
+        )
 
     print(json.dumps(audit_event), flush=True)
 
