@@ -3,13 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from broker import build_broker
-from config import Settings
-from market_data import build_market_data_provider
-from risk import evaluate_order_risk
-from strategy import candidate_to_dict, candidate_to_order, propose_paper_candidate
-
-WORKER_VERSION = "broker-read-risk-strategy-2026-06-09"
+WORKER_VERSION = "crash-safe-broker-read-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
@@ -21,78 +15,64 @@ MAX_POSITION_WEIGHT_PCT = float(os.getenv("MAX_POSITION_WEIGHT_PCT", "20"))
 MAX_NEW_POSITION_WEIGHT_PCT = float(os.getenv("MAX_NEW_POSITION_WEIGHT_PCT", "5"))
 
 
-def risk_decision_to_dict(decision):
-    if decision is None:
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def dict_from_object(obj):
+    if obj is None:
         return None
 
-    return {
-        "approved": decision.approved,
-        "rejection_reason": decision.rejection_reason,
-        "max_order_value": decision.max_order_value,
-        "projected_position_weight_pct": decision.projected_position_weight_pct,
-        "projected_daily_drawdown_pct": decision.projected_daily_drawdown_pct,
-        "exceptional_conviction_required": decision.exceptional_conviction_required,
-        "exceptional_conviction_passed": decision.exceptional_conviction_passed,
-    }
-
-
-def account_to_dict(account):
-    return {
-        "portfolio_value": account.portfolio_value,
-        "cash": account.cash,
-        "daily_pnl": account.daily_pnl,
-        "daily_pnl_pct": account.daily_pnl_pct,
-        "buying_power": account.buying_power,
-        "as_of": account.as_of,
-    }
-
-
-def positions_to_dict(positions):
-    return [
-        {
-            "symbol": position.symbol,
-            "quantity": position.quantity,
-            "market_value": position.market_value,
-            "average_cost": position.average_cost,
-            "current_price": position.current_price,
-        }
-        for position in positions
-    ]
-
-
-def order_to_dict(order):
-    if order is None:
-        return None
-
-    return {
-        "symbol": order.symbol,
-        "side": order.side.value,
-        "quantity": order.quantity,
-        "limit_price": order.limit_price,
-        "reason": order.reason,
-    }
-
-
-def quote_to_dict(quote):
-    return {
-        "symbol": quote.symbol,
-        "price": quote.price,
-        "bid": quote.bid,
-        "ask": quote.ask,
-        "as_of": quote.as_of,
-        "source": quote.source,
-    }
+    output = {}
+    for key, value in obj.__dict__.items():
+        if hasattr(value, "value"):
+            output[key] = value.value
+        else:
+            output[key] = value
+    return output
 
 
 def run_agent_cycle():
-    now = datetime.now(timezone.utc).isoformat()
+    broker_error = None
 
-    settings = Settings()
-    broker = build_broker(settings)
+    from main import AccountState, OrderRequest, OrderSide, Position
+    from market_data import build_market_data_provider
+    from risk import evaluate_order_risk
+    from strategy import candidate_to_dict, candidate_to_order, propose_paper_candidate
+
     market_data = build_market_data_provider()
 
-    account = broker.get_account()
-    positions = broker.get_positions()
+    try:
+        from broker import build_broker
+        from config import Settings
+
+        settings = Settings()
+        broker = build_broker(settings)
+        account = broker.get_account()
+        positions = broker.get_positions()
+        broker_status = "paper_broker_read_ok"
+    except Exception as exc:
+        broker_error = str(exc)
+        broker_status = "paper_broker_fallback"
+
+        account = AccountState(
+            portfolio_value=10000,
+            cash=2000,
+            daily_pnl=0,
+            daily_pnl_pct=0,
+            buying_power=2000,
+        )
+
+        nvda_quote = market_data.get_quote("NVDA")
+        positions = [
+            Position(
+                symbol="NVDA",
+                quantity=10,
+                market_value=round(10 * nvda_quote.price, 2),
+                average_cost=150,
+                current_price=nvda_quote.price,
+            )
+        ]
 
     candidate = propose_paper_candidate(account, positions, market_data)
     proposed_order = candidate_to_order(candidate)
@@ -111,28 +91,33 @@ def run_agent_cycle():
         )
 
     audit_event = {
-        "timestamp": now,
+        "timestamp": now_iso(),
         "worker_version": WORKER_VERSION,
         "service": "Robinhood autonomous stock agent",
         "mode": TRADING_MODE,
         "broker": BROKER,
-        "status": "paper_broker_read_ok",
-        "account": account_to_dict(account),
-        "positions": positions_to_dict(positions),
-        "market_quote": quote_to_dict(quote),
+        "status": broker_status,
+        "broker_error": broker_error,
+        "account": dict_from_object(account),
+        "positions": [dict_from_object(position) for position in positions],
+        "market_quote": dict_from_object(quote),
         "strategy_candidate": candidate_to_dict(candidate),
-        "paper_order_proposed": order_to_dict(proposed_order),
-        "risk_decision": risk_decision_to_dict(risk_decision),
+        "paper_order_proposed": dict_from_object(proposed_order),
+        "risk_decision": dict_from_object(risk_decision),
         "orders_submitted": 0,
-        "message": "Worker is reading the paper broker, running strategy, and checking risk. No orders are submitted.",
+        "message": "Worker is alive. Broker read is attempted; fallback paper data is used if broker/config crashes.",
     }
 
     print(
-        f"BROKER READ | cash={account.cash:.2f} | "
+        f"BROKER READ | status={broker_status} | "
+        f"cash={account.cash:.2f} | "
         f"portfolio_value={account.portfolio_value:.2f} | "
         f"positions={len(positions)}",
         flush=True,
     )
+
+    if broker_error:
+        print(f"BROKER ERROR | {broker_error}", flush=True)
 
     print(
         f"STRATEGY | candidate={candidate.symbol if candidate else 'none'} | "
@@ -167,13 +152,17 @@ def main():
         try:
             run_agent_cycle()
         except Exception as exc:
-            error_event = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "worker_version": WORKER_VERSION,
-                "status": "cycle_error",
-                "error": str(exc),
-            }
-            print(json.dumps(error_event), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "timestamp": now_iso(),
+                        "worker_version": WORKER_VERSION,
+                        "status": "cycle_error",
+                        "error": str(exc),
+                    }
+                ),
+                flush=True,
+            )
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
