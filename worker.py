@@ -2,10 +2,12 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-WORKER_VERSION = "daily-trade-limit-2026-06-09"
+WORKER_VERSION = "audit-log-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
+AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "logs/audit.jsonl")
 
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 BROKER = os.getenv("BROKER", "paper")
@@ -31,6 +33,14 @@ def dict_from_object(obj):
         else:
             output[key] = value
     return output
+
+
+def write_audit_event(event):
+    path = Path(AUDIT_LOG_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(event) + "\n")
 
 
 def run_agent_cycle():
@@ -97,8 +107,10 @@ def run_agent_cycle():
         "order_status": dict_from_object(order_status),
         "orders_submitted": orders_submitted,
         "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Paper execution is enabled with a daily trade limit. Live execution remains blocked.",
+        "message": "Paper execution is enabled with audit logging. Live execution remains blocked.",
     }
+
+    write_audit_event(audit_event)
 
     print(
         f"BROKER READ | cash={account.cash:.2f} | "
@@ -144,6 +156,7 @@ def run_agent_cycle():
     else:
         print("PAPER ORDER | status=none | orders_submitted=0", flush=True)
 
+    print(f"AUDIT LOG | wrote={AUDIT_LOG_PATH}", flush=True)
     print(json.dumps(audit_event), flush=True)
 
 
@@ -154,17 +167,14 @@ def main():
         try:
             run_agent_cycle()
         except Exception as exc:
-            print(
-                json.dumps(
-                    {
-                        "timestamp": now_iso(),
-                        "worker_version": WORKER_VERSION,
-                        "status": "cycle_error",
-                        "error": str(exc),
-                    }
-                ),
-                flush=True,
-            )
+            error_event = {
+                "timestamp": now_iso(),
+                "worker_version": WORKER_VERSION,
+                "status": "cycle_error",
+                "error": str(exc),
+            }
+            write_audit_event(error_event)
+            print(json.dumps(error_event), flush=True)
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
