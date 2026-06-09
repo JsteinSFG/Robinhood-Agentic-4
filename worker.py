@@ -4,9 +4,10 @@ import time
 from datetime import datetime, timezone
 
 from main import AccountState, OrderRequest, OrderSide, Position
+from market_data import build_market_data_provider
 from risk import evaluate_order_risk
 
-WORKER_VERSION = "risk-wired-2026-06-08"
+WORKER_VERSION = "market-data-risk-wired-2026-06-09"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 
@@ -35,25 +36,29 @@ def build_paper_account():
 
 
 def build_paper_positions():
+    nvda_quote = build_market_data_provider().get_quote("NVDA")
+
     return [
         Position(
             symbol="NVDA",
             quantity=10,
-            market_value=2000,
+            market_value=round(10 * nvda_quote.price, 2),
             average_cost=150,
-            current_price=200,
+            current_price=nvda_quote.price,
         )
     ]
 
 
-def build_paper_order():
+def build_paper_order(market_data):
+    quote = market_data.get_quote("MSFT")
+
     return OrderRequest(
         symbol="MSFT",
         side=OrderSide.BUY,
         quantity=1,
-        limit_price=100,
-        reason="Paper-mode worker risk integration test.",
-    )
+        limit_price=quote.ask,
+        reason="Paper-mode market data and risk integration test.",
+    ), quote
 
 
 def risk_decision_to_dict(decision):
@@ -68,12 +73,24 @@ def risk_decision_to_dict(decision):
     }
 
 
+def quote_to_dict(quote):
+    return {
+        "symbol": quote.symbol,
+        "price": quote.price,
+        "bid": quote.bid,
+        "ask": quote.ask,
+        "as_of": quote.as_of,
+        "source": quote.source,
+    }
+
+
 def run_agent_cycle():
     now = datetime.now(timezone.utc).isoformat()
 
+    market_data = build_market_data_provider()
     account = build_paper_account()
     positions = build_paper_positions()
-    proposed_order = build_paper_order()
+    proposed_order, quote = build_paper_order(market_data)
 
     risk_decision = evaluate_order_risk(
         account,
@@ -91,6 +108,7 @@ def run_agent_cycle():
         "mode": TRADING_MODE,
         "broker": BROKER,
         "status": "paper_cycle_ok",
+        "market_quote": quote_to_dict(quote),
         "risk_limits": {
             "max_daily_portfolio_loss_pct": MAX_DAILY_PORTFOLIO_LOSS_PCT,
             "max_position_weight_pct": MAX_POSITION_WEIGHT_PCT,
@@ -108,6 +126,16 @@ def run_agent_cycle():
             "daily_pnl_pct": account.daily_pnl_pct,
             "buying_power": account.buying_power,
         },
+        "paper_positions": [
+            {
+                "symbol": position.symbol,
+                "quantity": position.quantity,
+                "market_value": position.market_value,
+                "average_cost": position.average_cost,
+                "current_price": position.current_price,
+            }
+            for position in positions
+        ],
         "paper_order_proposed": {
             "symbol": proposed_order.symbol,
             "side": proposed_order.side.value,
@@ -118,7 +146,7 @@ def run_agent_cycle():
         "risk_decision": risk_decision_to_dict(risk_decision),
         "orders_submitted": 0,
         "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Worker is alive and risk.py is wired into the paper cycle. No live orders are submitted.",
+        "message": "Worker is alive, market_data.py is wired in, and risk.py is checking the paper order. No live orders are submitted.",
     }
 
     if TRADING_MODE == "live":
@@ -128,6 +156,12 @@ def run_agent_cycle():
             "Live mode is blocked until an approved Robinhood stock execution connector, "
             "fresh account data, fresh market data, and deterministic risk gates are implemented."
         )
+
+    print(
+        f"MARKET DATA | symbol={quote.symbol} | price={quote.price} | "
+        f"bid={quote.bid} | ask={quote.ask} | source={quote.source}",
+        flush=True,
+    )
 
     print(
         f"RISK CHECK | worker_version={WORKER_VERSION} | "
