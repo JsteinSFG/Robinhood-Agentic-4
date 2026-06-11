@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-WORKER_VERSION = "audit-log-2026-06-09"
+WORKER_VERSION = "status-summary-2026-06-11"
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "logs/audit.jsonl")
@@ -32,6 +32,7 @@ def dict_from_object(obj):
             output[key] = value.value
         else:
             output[key] = value
+
     return output
 
 
@@ -88,6 +89,17 @@ def run_agent_cycle():
             order_status = broker.place_order(proposed_order)
             orders_submitted = 1 if order_status.status == "filled" else 0
 
+    latest_action = candidate.action if candidate else "none"
+    latest_symbol = candidate.symbol if candidate else "none"
+    risk_result = (
+        "approved"
+        if risk_decision and risk_decision.approved
+        else "rejected"
+        if risk_decision
+        else "not_applicable"
+    )
+    order_result = order_status.status if order_status else "none"
+
     audit_event = {
         "timestamp": now_iso(),
         "worker_version": WORKER_VERSION,
@@ -106,11 +118,36 @@ def run_agent_cycle():
         "execution_block_reason": execution_block_reason,
         "order_status": dict_from_object(order_status),
         "orders_submitted": orders_submitted,
+        "summary": {
+            "cash": account.cash,
+            "portfolio_value": account.portfolio_value,
+            "positions_count": len(positions),
+            "trades_today": trades_today,
+            "max_trades_per_day": MAX_TRADES_PER_DAY,
+            "latest_symbol": latest_symbol,
+            "latest_action": latest_action,
+            "risk_result": risk_result,
+            "order_result": order_result,
+            "orders_submitted": orders_submitted,
+        },
         "live_execution_enabled": TRADING_MODE == "live",
-        "message": "Paper execution is enabled with audit logging. Live execution remains blocked.",
+        "message": "Paper execution is enabled with audit logging and status summaries. Live execution remains blocked.",
     }
 
     write_audit_event(audit_event)
+
+    print(
+        f"STATUS SUMMARY | cash={account.cash:.2f} | "
+        f"portfolio_value={account.portfolio_value:.2f} | "
+        f"positions={len(positions)} | "
+        f"trades_today={trades_today}/{MAX_TRADES_PER_DAY} | "
+        f"candidate={latest_symbol} | "
+        f"action={latest_action} | "
+        f"risk={risk_result} | "
+        f"order={order_result} | "
+        f"orders_submitted={orders_submitted}",
+        flush=True,
+    )
 
     print(
         f"BROKER READ | cash={account.cash:.2f} | "
@@ -121,8 +158,8 @@ def run_agent_cycle():
     )
 
     print(
-        f"STRATEGY | candidate={candidate.symbol if candidate else 'none'} | "
-        f"action={candidate.action if candidate else 'none'}",
+        f"STRATEGY | candidate={latest_symbol} | "
+        f"action={latest_action}",
         flush=True,
     )
 
